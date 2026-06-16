@@ -399,9 +399,80 @@ by sourcing it:  `. /tmp/kenmode.sh`
 Same as above but run after the connection exits.
 Useful for stuff like tidyups, etc.
 
+`nccm_config_on_connect_command`:
+Commands to run on the remote server immediately after connection,
+before you get control. This is a GLOBAL default that applies to all
+connections unless overridden by a per-connection `on_connect_command`.
+Useful for checking server status, disk space, or setting up environment.
+Supported values: false (default) or a command string.
+
+`nccm_config_on_connect_script`:
+Path to a local script that nccm will copy to the remote server via SCP
+before establishing the SSH connection. The script is placed in `/tmp/nccm-onconnect.sh`,
+made executable, and sourced automatically. This is a GLOBAL default that can be
+overridden per-connection.
+Useful for deploying environment setup scripts, SSH key configuration, or
+one-time initialization scripts without manual SCP commands.
+Supported values: false (default) or a valid local file path.
+
+Example - global on_connect_script setup:
+
+```yaml
+# In nccm.yml, specify a local script to be copied and sourced on every connection:
+nccm_config_on_connect_script: "~/bin/remote-setup.sh"
+
+# Per-connection override (optional):
+myserver:
+  host: 192.168.1.100
+  user: admin
+  on_connect_script: "~/bin/server-specific-setup.sh"  # Override global
+  on_connect_command: "export MY_VAR=hello"  # Additional commands
+```
+
+When `on_connect_script` is used, nccm will:
+1. Copy the local script to `/tmp/nccm-onconnect.sh` on the remote server
+2. Source the script: `. /tmp/nccm-onconnect.sh`
+3. Add `/tmp` to PATH: `export PATH="/tmp:$PATH"`
+4. Start your interactive shell
+
+Example - assume you have a script `~/bin/nccm-remote-setup.sh` on your
+local machine that you want to run on every remote server:
+
+```bash
+# Copy the script to the remote server (do this once per server):
+scp ~/bin/nccm-remote-setup.sh user@server:/tmp/
+
+# Make it executable and add /tmp to PATH for this session:
+ssh user@server 'chmod +x /tmp/nccm-remote-setup.sh && export PATH="/tmp:$PATH"'
+```
+
+```yaml
+# Then in nccm.yml, source it on every connection:
+nccm_config_on_connect_command: ". /tmp/nccm-remote-setup.sh && export PATH=\"/tmp:\$PATH\""
+```
+
+This assumes:
+- Your local script `~/bin/nccm-remote-setup.sh` already exists
+- You've copied it to `/tmp/` on the remote server
+- On every connection, the script is sourced and /tmp is added to PATH
+
+Example - per-connection override:
+```yaml
+nccm_config_on_connect_command: "uptime; df -h"
+
+production server:
+  address: 192.168.1.100
+  user: admin
+  on_connect_command: "whoami; pwd; export PS1='\u@prod: \w\$ '"
+  # This server uses its own specific command
+  
+dev server:
+  address: 192.168.1.101
+  user: dev
+  # This server uses the global default: "uptime; df -h"
+```
 
 `nccm_keybindings`:
--------------------
 
 nccm is configured for US keyboard mapping as entered into
 a standard linux xterm. If you have something else and

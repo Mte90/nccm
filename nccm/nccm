@@ -1116,6 +1116,10 @@ class GlobalConfig:
         # ^ Run a script prior to connection
     PostconnectScript = False
         # ^ Run a script after disconnection
+    OnConnectCommand = False
+        # ^ Global default command to run on remote server after connection
+    OnConnectScript = False
+        # ^ Global default script file to copy to remote server before connection
     PromptToContinue = False
         # ^ Prompt user to press Enter before connecting
     LoopNccm = False
@@ -1273,6 +1277,8 @@ class ServerXS:
         self.KeepAlive = ""
         self.Identity = ""
         self.CustomArgs = []
+        self.OnConnectCommand = False
+        self.OnConnectScript = False
 
 
 class Connections:
@@ -1556,6 +1562,27 @@ class Connections:
                     # ^ If you configured this item - you meant for it to work.
                     #       Therefore if it doesn't work it should be fixed or disabled.
 
+        # Handle loading of the GlobalConfig.OnConnectCommand value from nccm_config_on_connect_command:
+        GlobalConfig.OnConnectCommand = self.LoadedServersDict.pop(
+            'nccm_config_on_connect_command', False)
+        LogWrite.debug('Loaded {} config item:  GlobalConfig.OnConnectCommand == {}'
+            .format(GlobalConfig.ConfigFile, GlobalConfig.OnConnectCommand))
+
+        # Handle loading of the GlobalConfig.OnConnectScript value from nccm_config_on_connect_script:
+        GlobalConfig.OnConnectScript = self.LoadedServersDict.pop(
+            'nccm_config_on_connect_script', False)
+        LogWrite.debug('Loaded {} config item:  GlobalConfig.OnConnectScript == {}'
+            .format(GlobalConfig.ConfigFile, GlobalConfig.OnConnectScript))
+
+        if GlobalConfig.OnConnectScript:
+            # ^ If supplied, validate this is an existing readable file
+            if not os.path.isfile(GlobalConfig.OnConnectScript):
+                LogWrite.error('nccm_config_on_connect_script == {} does not exist or is not readable'
+                    .format(GlobalConfig.OnConnectScript))
+                raise Exception('On-connect script not found. '
+                    'Check the value of:  nccm_config_on_connect_script  in nccm.yml')
+            LogWrite.debug('On-connect script validated: {}'.format(GlobalConfig.OnConnectScript))
+
         # Handle loading of the keyboard bindings:
         self.KeyboardBindings = self.LoadedServersDict.pop(
             'nccm_keybindings', False)
@@ -1836,6 +1863,28 @@ class Connections:
                 if isinstance(FSL.CustomArgs, str):
                     FSL.CustomArgs = shlex.split(FSL.CustomArgs)
 
+                # Get on_connect_command if supplied:
+                # First check per-connection value, then fallback to global default
+                FSL.OnConnectCommand = self.LoadedServersDict[FriendlyName].get(
+                    'on_connect_command', GlobalConfig.OnConnectCommand)
+                if FSL.OnConnectCommand:
+                    LogWrite.debug('Server {} has on_connect_command: {}'.format(
+                        FriendlyName, FSL.OnConnectCommand))
+
+                # Get on_connect_script if supplied:
+                # First check per-connection value, then fallback to global default
+                FSL.OnConnectScript = self.LoadedServersDict[FriendlyName].get(
+                    'on_connect_script', GlobalConfig.OnConnectScript)
+                if FSL.OnConnectScript:
+                    # Validate the file exists and is readable
+                    if not os.path.isfile(FSL.OnConnectScript):
+                        LogWrite.error('Server {} has on_connect_script == {} but file does not exist'
+                            .format(FriendlyName, FSL.OnConnectScript))
+                        raise Exception('On-connect script for server {} not found. '.format(FriendlyName) +
+                            'Check the value in nccm.yml')
+                    LogWrite.debug('Server {} has on_connect_script: {}'.format(
+                        FriendlyName, FSL.OnConnectScript))
+
                 LogWrite.debug( {
                     'unsafe':   'ServerXSNum == {} , FriendlyName == {} , UserName == {} , '
                         'Address == {} , UserAddr == {} , Comment == {} , KeepAlive == {} , '
@@ -1961,6 +2010,23 @@ class Connections:
         if SelectedEntry.CustomArgs:
             CommandLine += SelectedEntry.CustomArgs
 
+        # Handle on_connect_command if supplied:
+        if SelectedEntry.OnConnectCommand:
+            # Append the on_connect command, then exec $SHELL to hand control to user
+            # The command string is wrapped in double quotes and $SHELL is escaped
+            CmdWithShell = '{}; exec \\$SHELL'.format(SelectedEntry.OnConnectCommand)
+            CommandLine += (CmdWithShell, )
+            LogWrite.debug('Added on_connect_command to SSH cmdline: {}'.format(
+                SelectedEntry.OnConnectCommand))
+
+        # Handle on_connect_script if supplied:
+        # If a script is being copied, source it after copy completes, then exec $SHELL
+        if SelectedEntry.OnConnectScript:
+            # Source the copied script and add /tmp to PATH, then exec shell
+            ScriptWithShell = '. /tmp/nccm-onconnect.sh && export PATH="/tmp:$PATH"; exec \\$SHELL'
+            CommandLine += (ScriptWithShell, )
+            LogWrite.debug('Added on_connect_script sourcing to SSH cmdline')
+
         if self.LogPath:    # Log file path is set:
             self.LogFileName = pathlib.PurePath(self.LogPath).joinpath('{}_{}_{}x{}.{}{}'
                 .format(datetime.datetime.now().strftime('%Y-%m-%d_%H%M%S'),
@@ -1994,6 +2060,11 @@ class Connections:
         CommandInfo['CommandLine'] = CommandLine
         CommandInfo['UserAddr'] = SelectedEntry.UserAddr
         CommandInfo['Identity'] = SelectedEntry.Identity
+        
+        # Pass on_connect_script info to main() for SCP copy
+        if SelectedEntry.OnConnectScript:
+            CommandInfo['OnConnectScript'] = SelectedEntry.OnConnectScript
+        
         return CommandInfo
 
 
@@ -3103,6 +3174,35 @@ def main(*args):
 
             else:
                 LogWrite.debug('GlobalConfig.PreconnectScript code was not run')
+
+            # OnConnectScript block: copy local script to remote server via SCP
+            if CommandInfo.get('OnConnectScript'):
+                LocalScript = CommandInfo['OnConnectScript']
+                RemoteScript = '/tmp/nccm-onconnect.sh'
+                UserAddr = CommandInfo['UserAddr']
+                
+                print('\nnccm: About to copy script to remote server:\n  Local: {}\n  Remote: {}@{}:{}\n'.format(
+                LocalScript, UserAddr.split('@')[0], UserAddr.split('@')[1], RemoteScript))
+                
+                if not GlobalConfig.PreconnectScript:
+                    PressEnterToCont('Press Enter to continue (before copying script) ...')
+
+                LogWrite.info( {
+                    'unsafe':   'About to scp {} to {}@{}:{} ...'.format(
+                        LocalScript, UserAddr.split('@')[0], UserAddr.split('@')[1], RemoteScript),
+                    'safe':     'About to scp script to remote server ...' } )
+
+                try:
+                    # Build SCP command: scp local_script user@host:/tmp/nccm-onconnect.sh
+                    ScpCommand = ['scp', LocalScript, '{}:{}'.format(UserAddr, RemoteScript)]
+                    subprocess.run(ScpCommand, check=True)
+                    LogWrite.debug('Successfully copied script to remote server')
+
+                except subprocess.CalledProcessError as CPE:
+                    print('\n***** SCP failed with exit code {} *****'.format(CPE.returncode))
+                    print('Failed to copy script: {}'.format(LocalScript))
+                    LogWrite.error('SCP failed: {}'.format(CPE))
+                    raise Exception('Failed to copy on-connect script to remote server. Check your SSH configuration and try again.')
 
             # ssh connection block:
             print('\nnccm: About to ssh using:\n{}\n'.format(CommandInfo['CommandLine']))

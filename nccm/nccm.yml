@@ -21,6 +21,12 @@
 #     roles:
 #       - ROLE_1
 #       - ROLE_2
+#     on_connect_command: COMMANDS
+#       ^ Commands to run on the remote server before giving control to you.
+#         Useful for setting environment, checking disk space, etc.
+#         Commands run in a single shell, then exec $SHELL hands control to you.
+#         Example: "uptime; df -h /home"
+#         (optional field, not supplied by default)
 #
 #   Details:
 #       FRIENDLY_NAME (mandatory field). Can be any of:
@@ -193,6 +199,24 @@ nccm_config_postconnect_script: false
 #   Be careful with this option - nccm has no control over what your
 #   script can do.
 
+nccm_config_on_connect_command: false
+# ^ Commands to run on the remote server immediately after connection,
+#   before you get control. This is a GLOBAL default that applies to all
+#   connections unless overridden by a per-connection 'on_connect_command'.
+#   Supported values: false or a command string
+#   Example: "uptime; df -h /home; export PS1='\u@\h: \w\$ '",
+#   Be careful with this option - nccm has no control over what commands do.
+
+nccm_config_on_connect_script: false
+# ^ Path to a local script file that will be copied to the remote server
+#   BEFORE each connection, then sourced in the SSH session.
+#   The script is copied to /tmp on the remote server as 'nccm-onconnect.sh'
+#   and then sourced with: ". /tmp/nccm-onconnect.sh && export PATH=\"/tmp:\$PATH\""
+#   Supported values: false (default) or a valid local file path
+#   Example: ~/.config/nccm/remote-setup.sh
+#   The file must exist and be readable on your local machine.
+#   This is useful for deploying environment setup scripts to multiple servers.
+
 nccm_keybindings:
   # ^ nccm is configured for US keyboard mapping. If your regional settings
   #   or your terminal itself present different key mappings
@@ -302,6 +326,16 @@ border router:                # Comments are allowed here
   #   You can also supply a non-default port this way.
   roles:
     - admin
+  on_connect_command: "uptime; df -h /home"
+  # ^ Commands to run on the remote server immediately after connection,
+  #   before you get control. Good for checking server status, disk space,
+  #   or setting up environment variables.
+  #   The commands run in a subshell, then 'exec $SHELL' hands control to you.
+  on_connect_script: ~/.config/nccm/remote-setup.sh
+  # ^ Path to a LOCAL script file that will be copied to /tmp/nccm-onconnect.sh
+  #   on the remote server BEFORE connecting, then sourced in the session.
+  #   Useful for deploying environment setup to specific servers.
+  #   Takes precedence over on_connect_command if both are supplied.
 
 test server:
   address: test.example.com
