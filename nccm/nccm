@@ -2010,22 +2010,33 @@ class Connections:
         if SelectedEntry.CustomArgs:
             CommandLine += SelectedEntry.CustomArgs
 
+        # Force PTY allocation when running remote commands (needed for interactive shell after exec)
+        if SelectedEntry.OnConnectCommand or SelectedEntry.OnConnectScript:
+            CommandLine += ('-t',)
+
         # Handle on_connect_command if supplied:
-        if SelectedEntry.OnConnectCommand:
-            # Append the on_connect command, then exec $SHELL to hand control to user
-            # The command string is wrapped in double quotes and $SHELL is escaped
-            CmdWithShell = '{}; exec \\$SHELL'.format(SelectedEntry.OnConnectCommand)
+        # If OnConnectScript is also set, the command is handled inside the script block
+        if SelectedEntry.OnConnectCommand and not SelectedEntry.OnConnectScript:
+            # Append the on_connect command, then exec user's shell (with fallback)
+            CmdWithShell = '{}; exec "${{SHELL:-/bin/bash}}"'.format(SelectedEntry.OnConnectCommand)
             CommandLine += (CmdWithShell, )
             LogWrite.debug('Added on_connect_command to SSH cmdline: {}'.format(
                 SelectedEntry.OnConnectCommand))
 
         # Handle on_connect_script if supplied:
-        # If a script is being copied, source it after copy completes, then exec $SHELL
+        # Read local script, base64 encode it, include decode+source in ONE SSH command
         if SelectedEntry.OnConnectScript:
-            # Source the copied script and add /tmp to PATH, then exec shell
-            ScriptWithShell = '. /tmp/nccm-onconnect.sh && export PATH="/tmp:$PATH"; exec \\$SHELL'
-            CommandLine += (ScriptWithShell, )
-            LogWrite.debug('Added on_connect_script sourcing to SSH cmdline')
+            import base64, pathlib
+            ScriptPath = pathlib.Path(SelectedEntry.OnConnectScript)
+            if ScriptPath.exists() and ScriptPath.is_file():
+                ScriptBytes = ScriptPath.read_bytes()
+                ScriptEncoded = base64.b64encode(ScriptBytes).decode('ascii')
+                ScriptRemoteName = '/tmp/' + ScriptPath.name
+                ScriptCmd = 'echo {} | base64 -d > {} && chmod +x {} && export PATH="/tmp:$PATH" && exec "${{SHELL:-/bin/bash}}"'.format(ScriptEncoded, ScriptRemoteName, ScriptRemoteName)
+                CommandLine += (ScriptCmd, )
+                LogWrite.debug('Added on_connect_script to SSH cmdline ({} bytes inline)'.format(len(ScriptBytes)))
+            else:
+                LogWrite.warning('on_connect_script file not found: {}'.format(SelectedEntry.OnConnectScript))
 
         if self.LogPath:    # Log file path is set:
             self.LogFileName = pathlib.PurePath(self.LogPath).joinpath('{}_{}_{}x{}.{}{}'
@@ -2045,8 +2056,8 @@ class Connections:
             CommandLine += ('|', 'tee', '--append', str(self.LogFileName))
             self.WriteLogFileHeader()   # Write info intro to the log file
 
-        CommandLine = ' '.join(CommandLine)
-        # ^ CommandLine was a list. Let's make it a string. Now looks like:
+        CommandLine = shlex.join(CommandLine)
+        # ^ CommandLine was a list. Let's make it a string (with proper quoting). Now looks like:
         # ssh user@192.168.1.1 -o ServerAliveInterval=40 | tee /logs/2021-03-07_16:45:18_user_AT_192.168.1.1
 
         LogWrite.debug( {
@@ -3121,7 +3132,14 @@ def main(*args):
         #   started using 'nccm -d' .
 
     while True:
-        CommandInfo = curses.wrapper(MainCursesFunction)
+        try:
+            CommandInfo = curses.wrapper(MainCursesFunction)
+        except Exception as E:
+            print('\n***** UNEXPECTED ERROR in MainCursesFunction: {} *****'.format(E))
+            import traceback
+            traceback.print_exc()
+            input('\nPress Enter to continue... ')
+            continue
 
         if CommandInfo:
 
@@ -3175,75 +3193,73 @@ def main(*args):
             else:
                 LogWrite.debug('GlobalConfig.PreconnectScript code was not run')
 
-            # OnConnectScript block: copy local script to remote server via SCP
-            if CommandInfo.get('OnConnectScript'):
-                LocalScript = CommandInfo['OnConnectScript']
-                RemoteScript = '/tmp/nccm-onconnect.sh'
-                UserAddr = CommandInfo['UserAddr']
-                
-                print('\nnccm: About to copy script to remote server:\n  Local: {}\n  Remote: {}@{}:{}\n'.format(
-                LocalScript, UserAddr.split('@')[0], UserAddr.split('@')[1], RemoteScript))
-                
-                if not GlobalConfig.PreconnectScript:
-                    PressEnterToCont('Press Enter to continue (before copying script) ...')
-
-                LogWrite.info( {
-                    'unsafe':   'About to scp {} to {}@{}:{} ...'.format(
-                        LocalScript, UserAddr.split('@')[0], UserAddr.split('@')[1], RemoteScript),
-                    'safe':     'About to scp script to remote server ...' } )
-
-                try:
-                    # Build SCP command: scp local_script user@host:/tmp/nccm-onconnect.sh
-                    ScpCommand = ['scp', LocalScript, '{}:{}'.format(UserAddr, RemoteScript)]
-                    subprocess.run(ScpCommand, check=True)
-                    LogWrite.debug('Successfully copied script to remote server')
-
-                except subprocess.CalledProcessError as CPE:
-                    print('\n***** SCP failed with exit code {} *****'.format(CPE.returncode))
-                    print('Failed to copy script: {}'.format(LocalScript))
-                    LogWrite.error('SCP failed: {}'.format(CPE))
-                    raise Exception('Failed to copy on-connect script to remote server. Check your SSH configuration and try again.')
-
             # ssh connection block:
-            print('\nnccm: About to ssh using:\n{}\n'.format(CommandInfo['CommandLine']))
 
             if not GlobalConfig.PreconnectScript:
                 PressEnterToCont('Press Enter to continue (before connecting) ...')
 
+            # Reset terminal manually via Python termios (more reliable than stty)
+            try:
+                import termios, tty, sys
+                fd = sys.stdin.fileno()
+                termios.tcdrain(fd)
+            except:
+                pass
+
             print('Connecting...')
 
             LogWrite.info( {
-                'unsafe':   'About to subprocess.run ExtCommand == {} ...'
+                'unsafe':   'About to os.system ExtCommand == {} ...'
                     .format(CommandInfo['CommandLine']),
-                'safe':     'About to subprocess.run ExtCommand == {} ...'
+                'safe':     'About to os.system ExtCommand == {} ...'
                     .format('CENSORED') } )
 
             StartTime = time.time()
+            SshExitCode = 0
 
             try:
-                subprocess.run(CommandInfo['CommandLine'], check=True, shell=True)
+                # Use subprocess.run with shell=True (proved working by test SSH)
+                Result = subprocess.run(CommandInfo['CommandLine'], shell=True)
+                SshExitCode = Result.returncode
+                if Result.returncode < 0:
+                    raise subprocess.CalledProcessError(
+                        Result.returncode, CommandInfo['CommandLine'])
+                elif Result.returncode > 0:
+                    print('\n***** ssh exit code == {} *****'
+                        .format(Result.returncode))
+                    LogWrite.warning('ssh exit code == {}'.format(Result.returncode))
                     # ^ Connect to the ssh server
 
             except subprocess.CalledProcessError as CPE:
+                SshExitCode = CPE.returncode
                 print('\n***** ssh exit code == {} *****'
                     .format(CPE.returncode))
                 print('Further debug details: {}'.format(CPE))
                 LogWrite.warning('ssh exit code == {}'.format(CPE.returncode))
                 LogWrite.warning('Further debug details: {}'.format(CPE))
+            except Exception as E:
+                SshExitCode = -1
+                print('\n***** UNEXPECTED ERROR: {} *****'.format(E))
+                import traceback
+                traceback.print_exc()
+                input('\nPress Enter to continue... ')
 
-            finally:
-                EndTime = time.time()
-                SessionTime = round(EndTime - StartTime)
-                print('\nnccm: Completed ssh using:\n{}\nSession time was: '
-                    '{} ({} seconds)\n'
-                        .format(CommandInfo['CommandLine'], datetime.timedelta(seconds=SessionTime),
-                            SessionTime))
+            EndTime = time.time()
+            SessionTime = round(EndTime - StartTime)
+            print('\nnccm: Completed ssh using:\n{}\nSession time was: '
+                '{} ({} seconds)\n'
+                    .format(CommandInfo['CommandLine'], datetime.timedelta(seconds=SessionTime),
+                        SessionTime))
+            
+            # Pause if SSH exited with error (so user can read error before window closes)
+            if Result.returncode != 0:
+                input('\nPress Enter to continue (SSH exited with error)... ')
 
-                LogWrite.info( {
-                    'unsafe':   'Completed ssh using: {} . SessionTime was: {} seconds'
-                        .format(CommandInfo['CommandLine'], SessionTime),
-                    'safe':     'Completed ssh using: {} . SessionTime was: {} seconds'
-                        .format('CENSORED', SessionTime) } )
+            LogWrite.info( {
+                'unsafe':   'Completed ssh using: {} . SessionTime was: {} seconds'
+                    .format(CommandInfo['CommandLine'], SessionTime),
+                'safe':     'Completed ssh using: {} . SessionTime was: {} seconds'
+                    .format('CENSORED', SessionTime) } )
 
             # PostconnectScript block:
             if GlobalConfig.PostconnectScript:
@@ -3269,19 +3285,19 @@ def main(*args):
             else:
                 LogWrite.debug('GlobalConfig.PostconnectScript code was not run')
 
-        if GlobalConfig.LoopNccm:
-            PressEnterToCont('Press Enter to continue (before returning to nccm) ...')
-            LogWrite.debug('GlobalConfig.LoopNccm == {} - we are looping nccm instead of exiting at this point'
-                .format(GlobalConfig.LoopNccm))
+            if GlobalConfig.LoopNccm:
+                PressEnterToCont('Press Enter to continue (before returning to nccm) ...')
+                LogWrite.debug('GlobalConfig.LoopNccm == {} - we are looping nccm instead of exiting at this point'
+                    .format(GlobalConfig.LoopNccm))
 
-            GlobalConfig.AutoConnect = False
+                GlobalConfig.AutoConnect = False
                 # ^ Disable this to prevent automatic loop connection to the same
                 #       server if only one match in list.
 
-        else:
-            LogWrite.debug('GlobalConfig.LoopNccm == {} - exiting nccm'
-                .format(GlobalConfig.LoopNccm))
-            break
+            else:
+                LogWrite.debug('GlobalConfig.LoopNccm == {} - exiting nccm'
+                    .format(GlobalConfig.LoopNccm))
+                break
 
 
 if __name__ == '__main__':
