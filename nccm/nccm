@@ -3283,6 +3283,8 @@ def main(*args):
             else:
                 LogWrite.debug('GlobalConfig.LoopNccm == {} - exiting nccm'
                     .format(GlobalConfig.LoopNccm))
+                LocalShell = os.environ.get('SHELL', '/bin/bash')
+                subprocess.run([LocalShell])
                 break
 
 
