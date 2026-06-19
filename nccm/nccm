@@ -3225,18 +3225,12 @@ def main(*args):
                     raise subprocess.CalledProcessError(
                         Result.returncode, CommandInfo['CommandLine'])
                 elif Result.returncode > 0:
-                    print('\n***** ssh exit code == {} *****'
-                        .format(Result.returncode))
                     LogWrite.warning('ssh exit code == {}'.format(Result.returncode))
                     # ^ Connect to the ssh server
 
             except subprocess.CalledProcessError as CPE:
                 SshExitCode = CPE.returncode
-                print('\n***** ssh exit code == {} *****'
-                    .format(CPE.returncode))
-                print('Further debug details: {}'.format(CPE))
                 LogWrite.warning('ssh exit code == {}'.format(CPE.returncode))
-                LogWrite.warning('Further debug details: {}'.format(CPE))
             except Exception as E:
                 SshExitCode = -1
                 print('\n***** UNEXPECTED ERROR: {} *****'.format(E))
@@ -3246,14 +3240,6 @@ def main(*args):
 
             EndTime = time.time()
             SessionTime = round(EndTime - StartTime)
-            print('\nnccm: Completed ssh using:\n{}\nSession time was: '
-                '{} ({} seconds)\n'
-                    .format(CommandInfo['CommandLine'], datetime.timedelta(seconds=SessionTime),
-                        SessionTime))
-            
-            # Pause if SSH exited with error (so user can read error before window closes)
-            if Result.returncode != 0:
-                input('\nPress Enter to continue (SSH exited with error)... ')
 
             LogWrite.info( {
                 'unsafe':   'Completed ssh using: {} . SessionTime was: {} seconds'
